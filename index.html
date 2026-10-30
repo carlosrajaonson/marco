@@ -38,6 +38,9 @@ dialog{border:1px solid var(--line);border-radius:10px;padding:18px;width:min(52
 dialog form{display:grid;gap:10px}
 #auth{max-width:340px;margin:12vh auto;background:#fff;padding:22px;border-radius:10px;border:1px solid var(--line);display:grid;gap:10px}
 #msg{color:var(--neg);padding:0 18px}
+fieldset{border:1px solid var(--line);border-radius:8px;padding:8px 10px}legend{font-weight:600;padding:0 4px}
+.rw{display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap;align-items:center}.rw select{flex:1 1 120px}.rw input{width:84px}
+dialog{max-height:92vh}
 [hidden]{display:none!important}
 :focus-visible{outline:2px solid var(--acc);outline-offset:1px}
 </style>
@@ -52,7 +55,7 @@ dialog form{display:grid;gap:10px}
 </form>
 
 <div id="app" hidden>
-  <header><h1>Pilotage financier</h1><nav id="tabs"></nav><button class="btn" id="out">Se déconnecter</button></header>
+  <header><h1>Pilotage financier</h1><nav id="tabs"></nav><button class="btn p" onclick="wiz('Dépense')">+ Dépense</button><button class="btn p" onclick="wiz('Recette')">+ Entrée</button><button class="btn" id="out">Se déconnecter</button></header>
   <section class="filters">
     <label>Du<input type="date" id="fd"></label>
     <label>Au<input type="date" id="ft"></label>
@@ -283,7 +286,7 @@ function controles(){
 function list(t){
   const cf=CFG[t],cols=cf.cols.filter(x=>!(cf.auto&&x.k==='id')),rows=D[t].filter(r=>rowOK(t,r));
   const cell=(x,v)=>v==null||v===''?'':x.t==='p'?pc(v):x.t==='n'?fmt(v):esc(v);
-  $('#view').innerHTML=`<div class="bar"><b>${rows.length} ligne(s) · filtres appliqués</b><button class="btn p" onclick="edit('${t}')">+ Ajouter</button></div>
+  $('#view').innerHTML=`<div class="bar"><b>${rows.length} ligne(s) · filtres appliqués</b>${t==='operations'?`<span><button class="btn p" onclick="wiz('Dépense')">+ Dépense</button> <button class="btn p" onclick="wiz('Recette')">+ Entrée</button> <button class="btn" onclick="edit('operations')">+ Autre (prêt, apport, transfert…)</button></span>`:`<button class="btn p" onclick="edit('${t}')">+ Ajouter</button>`}</div>
   <div class="box"><table><tr>${cols.map(x=>`<th class="${x.t==='n'||x.t==='p'?'n':''}">${x.l}`).join('')}${(cf.calc||[]).map(k=>`<th>${k[0]}`).join('')}<th></tr>
   ${rows.slice(0,500).map(r=>`<tr>${cols.map(x=>`<td class="${x.t==='n'||x.t==='p'?'n':''}">${cell(x,r[x.k])}`).join('')}${(cf.calc||[]).map(k=>{const v=k[1](r);return`<td class="${String(v).startsWith('ERREUR')||v==='En retard'?'bad':''}">${esc(v)}`}).join('')}
   <td><button class="btn s" onclick="edit('${t}','${r.id}')">Modifier</button> <button class="btn s" onclick="del('${t}','${r.id}')">Suppr.</button>`).join('')}</table>
@@ -299,6 +302,7 @@ function render(){
 /* ---------- Saisie ---------- */
 const opts=o=>o==='cats'?D.categories.map(x=>x.name):o==='actors'?D.actors.map(x=>x.name):o==='wallets'?D.wallets.map(x=>x.name):o==='ops'?D.operations.map(x=>x.id):o;
 function edit(t,id){
+  if(t==='operations'&&id!=null&&['Dépense','Recette'].includes(OM[id]?.nature))return wiz(OM[id].nature,id);
   const cf=CFG[t],r=id!=null?D[t].find(x=>String(x.id)===String(id)):null;
   const next=cf.pre?cf.pre+String(Math.max(0,...D[t].map(x=>parseInt(String(x.id).replace(/\D/g,''))||0))+1).padStart(4,'0'):'';
   $('#f').innerHTML=`<h2>${r?'Modifier':'Ajouter'}</h2>`+cf.cols.filter(x=>!(cf.auto&&x.k==='id')).map(x=>{
@@ -328,11 +332,90 @@ function edit(t,id){
 }
 async function del(t,id){
   if(!confirm('Supprimer cette ligne ?'+(t==='operations'?' Sa répartition et ses mouvements seront supprimés aussi.':'')))return;
+  if(t==='operations')await sb.from('debts').delete().eq('operation_id',id).eq('notes','Auto');
   const{error}=await sb.from(t).delete().eq('id',id);
   if(error){alert('Suppression refusée : '+error.message);return}
   await refresh();
 }
 async function refresh(){await load();fillFilters();render()}
+
+/* ---------- Saisie guidée : dépense / entrée ---------- */
+const r2=x=>Math.round(x*100)/100;
+const nextId=t=>CFG[t].pre+String(Math.max(0,...D[t].map(x=>parseInt(String(x.id).replace(/\D/g,''))||0))+1).padStart(4,'0');
+function split(M,rows){let acc=0;return rows.map((x,i)=>{const a=i===rows.length-1?r2(M-acc):r2(M*x.pct/100);acc+=a;return a})}
+function calcDebts(M,P,B,isD){
+  const net={};
+  split(M,P).forEach((a,i)=>net[P[i].actor]=(net[P[i].actor]||0)+a);
+  split(M,B).forEach((a,i)=>net[B[i].actor]=(net[B[i].actor]||0)-a);
+  const pos=Object.entries(net).filter(e=>e[1]>.005),neg=Object.entries(net).filter(e=>e[1]<-.005),sp=sum(pos,e=>e[1]),out=[];
+  neg.forEach(([n,v])=>pos.forEach(([p,w])=>{const a=r2(-v*w/sp);if(a>=.01)out.push(isD?{creditor:p,debtor:n,amount:a}:{creditor:n,debtor:p,amount:a})}));
+  return out;
+}
+function wiz(nature,id){
+  const isD=nature==='Dépense',r=id?OM[id]:null,f=$('#f');
+  const S={id:r?.id||nextId('operations'),amount:r?.amount||'',date:r?.op_date||today(),label:r?.label||'',cat:r?.category||'',ref:r?.reference||'',P:[{actor:'',pct:100,wallet:''}],B:[{actor:'',pct:100}]};
+  if(r){
+    S.P=D.wallet_movements.filter(m=>m.operation_id===id).map(m=>({actor:m.actor,wallet:m.wallet,pct:r2(m.amount/r.amount*100)}));
+    S.B=D.actor_allocations.filter(a=>a.operation_id===id).map(a=>({actor:a.actor,pct:r2(allocAmt(a)/r.amount*100)}));
+  }
+  const opt=(arr,v,ph)=>`<option value="">${ph}</option>`+arr.map(x=>`<option${x===v?' selected':''}>${esc(x)}</option>`).join('');
+  const AN=D.actors.map(a=>a.name),WN=D.wallets.map(w=>w.name),CN=D.categories.map(x=>x.name);
+  const read=()=>{S.amount=$('#w_a').value;S.date=$('#w_d').value;S.label=$('#w_l').value;S.cat=$('#w_c').value;S.ref=$('#w_r').value};
+  const row=(g,x,i)=>`<div class="rw"><select data-g="${g}" data-i="${i}" data-k="actor" required>${opt(AN,x.actor,'Acteur')}</select>
+    <input type="number" step="any" min="0" max="100" data-g="${g}" data-i="${i}" data-k="pct" value="${x.pct}" aria-label="Pourcentage"> %
+    ${g==='P'?`<select data-g="P" data-i="${i}" data-k="wallet" required>${opt(WN,x.wallet,isD?'Source (portefeuille)':'Portefeuille')}</select>`:''}
+    <button type="button" class="btn s" data-rm="${g}:${i}" aria-label="Retirer">✕</button></div>`;
+  function draw(first){
+    if(!first)read();
+    f.innerHTML=`<h2>${r?'Modifier':'Nouvelle'} ${isD?'dépense':'entrée d\'argent'} · ${S.id}</h2>
+    <label>Combien (Ar)<input id="w_a" type="number" step="any" min="0.01" required value="${S.amount}"></label>
+    <label>Quand<input id="w_d" type="date" required value="${S.date}"></label>
+    <label>${isD?'Pour quoi':'Pourquoi (motif)'}<input id="w_l" required value="${esc(S.label)}"></label>
+    <label>Catégorie<select id="w_c">${opt(CN,S.cat,'—')}</select></label>
+    <fieldset><legend>${isD?'Qui paie, de quelle source, et pour quel % ?':'Qui reçoit, sur quel portefeuille, et pour quel % ?'}</legend>${S.P.map((x,i)=>row('P',x,i)).join('')}<button type="button" class="btn s" data-add="P">+ Ajouter</button></fieldset>
+    <fieldset><legend>${isD?'Pour qui (bénéficiaire), et pour quel % ?':'À qui revient cet argent, et pour quel % ?'}</legend>${S.B.map((x,i)=>row('B',x,i)).join('')}<button type="button" class="btn s" data-add="B">+ Ajouter</button></fieldset>
+    <div id="w_s"></div>
+    <label>Pièce / référence<input id="w_r" value="${esc(S.ref)}"></label>
+    <div class="bar"><button type="button" class="btn" onclick="$('#dlg').close()">Annuler</button><button class="btn p" id="w_ok">Enregistrer</button></div>`;
+    check();
+  }
+  function check(){
+    const M=+$('#w_a').value||0,sp=sum(S.P,x=>+x.pct||0),sbn=sum(S.B,x=>+x.pct||0);
+    const okP=Math.abs(sp-100)<.01&&S.P.every(x=>x.actor&&x.wallet),okB=Math.abs(sbn-100)<.01&&S.B.every(x=>x.actor),ok=okP&&okB&&M>0;
+    const ds=ok?calcDebts(M,S.P,S.B,isD):[];
+    $('#w_s').innerHTML=`<small class="${okP?'':'bad'}">${isD?'Payeurs':'Receveurs'} : ${sp} % ${okP?'✔':'— total 100 % requis, avec acteur et portefeuille sur chaque ligne'}</small><br>
+    <small class="${okB?'':'bad'}">${isD?'Bénéficiaires':'Ayants droit'} : ${sbn} % ${okB?'✔':'— total 100 % requis'}</small>`+
+    (ds.length?`<p><b>Dettes créées automatiquement</b><br>${ds.map(d=>`${esc(d.debtor)} doit ${fmt(d.amount)} Ar à ${esc(d.creditor)}`).join('<br>')}</p>`:ok?`<p><small>Aucune dette : ${isD?'ceux qui paient sont les bénéficiaires':'ceux qui reçoivent sont les ayants droit'}.</small></p>`:'');
+    $('#w_ok').disabled=!ok;
+  }
+  f.oninput=f.onchange=e=>{
+    const t=e.target,d=t.dataset;
+    if(d.g){
+      const x=S[d.g][d.i];x[d.k]=d.k==='pct'?+t.value:t.value;
+      if(d.k==='actor'&&d.g==='P'&&e.type==='change'){x.wallet=(D.wallets.find(w=>w.economic_owner===t.value)||{name:x.wallet}).name;draw();return}
+    }
+    check();
+  };
+  f.onclick=e=>{
+    const d=e.target.dataset;
+    if(d.add){read();const left=Math.max(0,r2(100-sum(S[d.add],x=>+x.pct||0)));S[d.add].push(d.add==='P'?{actor:'',pct:left,wallet:''}:{actor:'',pct:left});draw()}
+    if(d.rm){const[g,i]=d.rm.split(':');if(S[g].length>1){read();S[g].splice(+i,1);draw()}}
+  };
+  f.onsubmit=async e=>{
+    e.preventDefault();
+    const M=+$('#w_a').value,ds=calcDebts(M,S.P,S.B,isD);
+    if(r&&D.debts.some(d=>d.operation_id===id&&d.notes==='Auto'&&d.repaid>0)&&!confirm('Des remboursements ont déjà été saisis sur les dettes de cette opération : elles seront recalculées et ces remboursements perdus. Continuer ?'))return;
+    const pm=split(M,S.P),bm=split(M,S.B),n=parseInt(nextId('debts').replace(/\D/g,''));
+    const payload={op:{id:S.id,op_date:$('#w_d').value,label:$('#w_l').value,nature,category:$('#w_c').value||null,amount:M,status:'Réel',reference:$('#w_r').value||null},
+      allocations:S.B.map((x,i)=>({actor:x.actor,imputation:isD?'Charge supportée':'Recette bénéficiaire',pct:x.pct/100,amount_input:bm[i]})),
+      movements:S.P.map((x,i)=>({wallet:x.wallet,actor:x.actor,direction:isD?'Sortie':'Entrée',amount:pm[i]})),
+      debts:ds.map((d,i)=>({...d,id:'DT-'+String(n+i).padStart(4,'0')}))};
+    const{error}=await sb.rpc('save_operation',{p:payload});
+    if(error){alert('Enregistrement refusé : '+error.message);return}
+    $('#dlg').close();await refresh();
+  };
+  draw(1);$('#dlg').showModal();
+}
 
 /* ---------- Événements ---------- */
 $('#tabs').onclick=e=>{if(e.target.dataset.t){tab=e.target.dataset.t;render()}};
